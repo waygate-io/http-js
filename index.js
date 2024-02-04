@@ -3,6 +3,7 @@ const MAX_HEADER_SIZE = 16*1024;
 class Server {
 
   constructor(args) {
+    this._domain = args.domain;
     this._handler = args.handler;
     this._decoder = new TextDecoder('utf-8');
   }
@@ -27,7 +28,7 @@ class Server {
     let haveHeaders = false;
 
     // TODO: unlock stream after parsing headers
-    const reader = conn.getReadableStream().getReader();
+    const reader = conn.readable.getReader();
 
     let headerText = "";
     let bodyStart = "";
@@ -68,18 +69,20 @@ class Server {
       headers[headerParts[0].trim().toLowerCase()] = headerParts[1].trim();
     }
 
-    const request = {
-      method,
-      url: {
-        path,
-      },
-      headers,
-      proto,
-      // TODO: release reader
-      body: conn.getReadableStream(),
-    };
+    let body = null;
+    if (method !== 'HEAD' && method !== 'GET') {
+      body = conn.readable;
+    }
 
-    const responseWriter = new ResponseWriter(conn.getWritableStream());
+    let uri = `https://${this._domain}${path}`;
+
+    const request = new Request(uri, {
+      method,
+      headers,
+      body,
+    });
+
+    const responseWriter = new ResponseWriter(conn.writable);
 
     this._handler.serveHTTP(responseWriter, request);
   }
@@ -96,8 +99,12 @@ class ServeMux {
 
   async serveHTTP(w, r) {
 
+    console.log(r.url);
+
+    let u = new URL(r.url);
+
     for (const path in this._map) {
-      if (r.url.path.startsWith(path)) {
+      if (u.pathname.startsWith(path)) {
         const callback = this._map[path];
         await callback(w, r);
         if (w._writer) {
@@ -155,7 +162,7 @@ class ResponseWriter {
       this._writer.releaseLock();
     }
 
-    // TODO: feels brittle. also we should be able to switch back and worth
+    // TODO: feels brittle. also we should be able to switch back and forth
     // between manual writing and piping
     this._writer = null;
 
