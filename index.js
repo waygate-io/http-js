@@ -42,13 +42,10 @@ class Server {
         throw new Error("Headers too big");
       }
 
-      console.log(value, done);
       const text = this._decoder.decode(value);
 
       const parts = text.split("\r\n\r\n");
       headerText += parts[0];
-
-      console.log(parts);
 
       if (parts.length > 1) {
         bodyStart = parts[1];
@@ -71,14 +68,12 @@ class Server {
       headers[headerParts[0].trim().toLowerCase()] = headerParts[1].trim();
     }
 
-    console.log(method, path, proto, headers, bodyStart);
-
     const request = {
       method,
       url: {
         path,
       },
-      header: headers,
+      headers,
       proto,
       // TODO: release reader
       body: conn.getReadableStream(),
@@ -100,10 +95,16 @@ class ServeMux {
   }
 
   async serveHTTP(w, r) {
-    const callback = this._map[r.url.path];
-    if (callback !== undefined) {
-      await callback(w, r);
-      await w._writer.close();
+
+    for (const path in this._map) {
+      if (r.url.path.startsWith(path)) {
+        const callback = this._map[path];
+        await callback(w, r);
+        if (w._writer) {
+          await w._writer.close();
+        }
+        break;
+      }
     }
   }
 }
@@ -162,7 +163,22 @@ class ResponseWriter {
   }
 }
 
+function parseRangeHeader(headerText, maxSize) {
+  const range = {};
+  const right = headerText.split('=')[1];
+  const rangeParts = right.split('-');
+  range.start = Number(rangeParts[0]);
+  //range.end = maxSize - 1;
+
+  if (rangeParts[1]) {
+    range.end = Number(rangeParts[1]);
+  }
+
+  return range;
+}
+
 export {
   Server,
   ServeMux,
+  parseRangeHeader,
 };
