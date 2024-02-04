@@ -5,10 +5,11 @@ class Server {
   constructor(args) {
     this._domain = args.domain;
     this._handler = args.handler;
+    this._encoder = new TextEncoder('utf-8');
     this._decoder = new TextDecoder('utf-8');
   }
 
-  async serve(listener) {
+  async serve(listener, callback) {
     while (true) {
 
       let conn;
@@ -20,11 +21,11 @@ class Server {
         throw e;
       }
       
-      this.handleConn(conn);
+      this.handleConn(conn, callback);
     }
   }
 
-  async handleConn(conn) {
+  async handleConn(conn, callback) {
     let haveHeaders = false;
 
     // TODO: unlock stream after parsing headers
@@ -82,91 +83,32 @@ class Server {
       body,
     });
 
-    const responseWriter = new ResponseWriter(conn.writable);
+    const response = await callback(request);
 
-    this._handler.serveHTTP(responseWriter, request);
-  }
-}
-
-class ServeMux {
-  constructor() {
-    this._map = {};
+    await this._sendResponse(conn, response);
+    
   }
 
-  handleFunc(path, callback) {
-    this._map[path] = callback;
-  }
+  async _sendResponse(conn, res) {
+    let headerText = `HTTP/1.1 ${res.status}\r\n`;
 
-  async serveHTTP(w, r) {
-
-    console.log(r.url);
-
-    let u = new URL(r.url);
-
-    for (const path in this._map) {
-      if (u.pathname.startsWith(path)) {
-        const callback = this._map[path];
-        await callback(w, r);
-        if (w._writer) {
-          await w._writer.close();
-        }
-        break;
-      }
-    }
-  }
-}
-
-class ResponseWriter {
-  constructor(writable) {
-    this.headers = {};
-
-    this._writable = writable;
-
-    this._writer = writable.getWriter();
-
-    this._encoder = new TextEncoder('utf-8');
-
-    this._headersSent = false;
-  }
-
-  async writeHeader(statusCode) {
-
-    let headerText = `HTTP/1.1 ${statusCode}\r\n`;
-
-    for (const key in this.headers) {
-      headerText += `${key}: ${this.headers[key]}\r\n`;
+    for (const pair of res.headers.entries()) {
+      headerText += `${pair[0]}: ${pair[1]}\r\n`;
     }
 
     headerText += `\r\n`;
 
     const headers = this._encoder.encode(headerText);
 
-    await this._writer.write(headers);
+    const writer = conn.writable.getWriter();
 
-    this._headersSent = true;
-  }
+    await writer.write(headers);
+    writer.releaseLock();
 
-  async write(data) {
-    if (!this._headersSent) {
-      await this.writeHeader(200);
-    }
-    return this._writer.write(data);
-  }
+    await res.body.pipeTo(conn.writable);
 
-  async getWritableStream() {
-    if (!this._headersSent) {
-      await this.writeHeader(200);
-    }
-
-    if (this._writable.locked) {
-      this._writer.releaseLock();
-    }
-
-    // TODO: feels brittle. also we should be able to switch back and forth
-    // between manual writing and piping
-    this._writer = null;
-
-    return this._writable;
+    // TODO: might need to close here
+    //await writer.close();
   }
 }
 
@@ -186,6 +128,5 @@ function parseRangeHeader(headerText, maxSize) {
 
 export {
   Server,
-  ServeMux,
   parseRangeHeader,
 };
