@@ -112,6 +112,56 @@ class Server {
   }
 }
 
+function directoryTreeHandler(dirTree) {
+  return async (r) => {
+    const url = new URL(r.url);
+
+    console.log(dirTree);
+    let file;
+    try {
+      file = await dirTree.openFile(url.pathname);
+    }
+    catch (e) {
+      return new Response("Not found", {
+        status: 404,
+      });
+    }
+
+    let sendFile = file;
+    const contentType = file.type;
+
+    let statusCode = 200;
+
+    const headers = {};
+
+    if (r.headers.get('range')) {
+      const range = parseRangeHeader(r.headers.get('range'));
+
+      if (range.end !== undefined) {
+        sendFile = file.slice(range.start, range.end + 1);
+        headers['Content-Range'] = `bytes ${range.start}-${range.end}/${file.size}`;
+      }
+      else {
+        sendFile = file.slice(range.start);
+        headers['Content-Range'] = `bytes ${range.start}-${file.size - 1}/${file.size}`;
+      }
+
+      statusCode = 206;
+    }
+
+    headers['Accept-Ranges'] = 'bytes';
+    headers['Content-Type'] = contentType;
+    headers['Content-Length'] = sendFile.size;
+
+    console.log("Serve file", sendFile);
+
+    return new Response(sendFile.stream(), {
+      status: statusCode,
+      headers,
+    });
+  };
+}
+
 function parseRangeHeader(headerText, maxSize) {
   const range = {};
   const right = headerText.split('=')[1];
@@ -129,4 +179,5 @@ function parseRangeHeader(headerText, maxSize) {
 export {
   Server,
   parseRangeHeader,
+  directoryTreeHandler,
 };
