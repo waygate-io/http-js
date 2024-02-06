@@ -105,7 +105,12 @@ class Server {
     await writer.write(headers);
     writer.releaseLock();
 
-    await res.body.pipeTo(conn.writable);
+    try {
+      await res.body.pipeTo(conn.writable);
+    }
+    catch (e) {
+      console.error("Error res.body.pipeTo", e);
+    }
 
     // TODO: might need to close here
     //await writer.close();
