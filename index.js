@@ -3,9 +3,10 @@ const MAX_HEADER_SIZE = 16*1024;
 class Server {
 
   constructor(args) {
+
     this._domain = args.domain;
     this._handler = args.handler;
-    this._encoder = new TextEncoder('utf-8');
+    this._encoder = new TextEncoder();
     this._decoder = new TextDecoder('utf-8');
   }
 
@@ -64,6 +65,7 @@ class Server {
     const path = statusParts[1];
     const proto = statusParts[2];
 
+    /** @type {HeadersInit} */
     const headers = {};
     for (const header of headerLines.slice(1)) {
       const headerParts = header.split(":");
@@ -86,7 +88,8 @@ class Server {
     const response = await callback(request);
 
     await this._sendResponse(conn, response);
-    
+
+    return null;
   }
 
   async _sendResponse(conn, res) {
@@ -114,6 +117,8 @@ class Server {
 
     // TODO: might need to close here
     //await writer.close();
+
+    return null;
   }
 }
 
@@ -137,6 +142,7 @@ function directoryTreeHandler(dirTree) {
 
     let statusCode = 200;
 
+    /** @type {HeadersInit} */
     const headers = {};
 
     if (r.headers.get('range')) {
