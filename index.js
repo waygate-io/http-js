@@ -4,13 +4,14 @@ class Server {
 
   constructor(args) {
 
-    this._domain = args.domain;
-    this._handler = args.handler;
     this._encoder = new TextEncoder();
     this._decoder = new TextDecoder('utf-8');
   }
 
   async serve(listener, callback) {
+
+    this._domain = listener.domain;
+
     while (true) {
 
       let conn;
