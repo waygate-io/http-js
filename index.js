@@ -112,7 +112,7 @@ class Server {
       await res.body.pipeTo(conn.writable);
     }
     catch (e) {
-      console.error("Error res.body.pipeTo", e);
+      //console.error("http-js error: res.body.pipeTo", e);
     }
 
     // TODO: might need to close here
@@ -126,7 +126,6 @@ function directoryTreeHandler(dirTree) {
   return async (r) => {
     const url = new URL(r.url);
 
-    console.log(dirTree);
     let file;
     try {
       file = await dirTree.openFile(url.pathname);
@@ -163,8 +162,6 @@ function directoryTreeHandler(dirTree) {
     headers['Accept-Ranges'] = 'bytes';
     headers['Content-Type'] = contentType;
     headers['Content-Length'] = sendFile.size;
-
-    console.log("Serve file", sendFile);
 
     return new Response(sendFile.stream(), {
       status: statusCode,
