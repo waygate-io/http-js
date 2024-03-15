@@ -10,7 +10,7 @@ class Server {
 
   async serve(listener, callback) {
 
-    this._domain = listener.domain;
+    this._domain = listener.getDomain();
 
     while (true) {
 
