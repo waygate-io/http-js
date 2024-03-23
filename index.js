@@ -1,5 +1,20 @@
 const MAX_HEADER_SIZE = 16*1024;
 
+class Request {
+  constructor(uri, opts) {
+    this._uri = uri;
+    this._opts = opts;
+  }
+
+  get body() {
+    return this._opts.body;
+  }
+
+  get headers() {
+    return new Headers(this._opts.headers);
+  }
+}
+
 class Server {
 
   constructor(args) {
@@ -30,7 +45,6 @@ class Server {
   async handleConn(conn, callback) {
     let haveHeaders = false;
 
-    // TODO: unlock stream after parsing headers
     const reader = conn.readable.getReader();
 
     let headerText = "";
@@ -57,6 +71,8 @@ class Server {
       }
     }
 
+    reader.releaseLock();
+
     const headerLines = headerText.split("\r\n");
 
     const statusLine = headerLines[0];
@@ -70,16 +86,40 @@ class Server {
     const headers = {};
     for (const header of headerLines.slice(1)) {
       const headerParts = header.split(":");
-      headers[headerParts[0].trim().toLowerCase()] = headerParts[1].trim();
+      const headerName = headerParts[0].trim().toLowerCase();
+      headers[headerName] = headerParts[1].trim();
     }
+
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
 
     let body = null;
     if (method !== 'HEAD' && method !== 'GET') {
-      body = conn.readable;
+      body = readable;
+
+      const contentLength = Number(headers['content-length']);
+
+      (async () => {
+        let n = 0;
+        for await (const chunk of conn.readable) {
+
+          await writer.write(chunk);
+
+          // TODO: handle if they send more than content-length
+          n += chunk.byteLength;
+
+          if (n >= contentLength) {
+            writer.close();
+            break;
+          }
+        }
+      })();
     }
 
     let uri = `https://${this._domain}${path}`;
 
+    // TODO: had to use custom type because headers were being censored. ie
+    // content-length was being removed
     const request = new Request(uri, {
       method,
       headers,
