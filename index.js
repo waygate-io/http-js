@@ -13,6 +13,10 @@ class Request {
   get headers() {
     return new Headers(this._opts.headers);
   }
+
+  get url() {
+    return this._uri;
+  }
 }
 
 class Server {
