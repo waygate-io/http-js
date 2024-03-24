@@ -67,11 +67,18 @@ class Server {
 
       if (parts.length > 1) {
         bodyStart = parts[1];
+        if (bodyStart.length > 0) {
+          throw new Error("bodyStart not empty", bodyStart);
+        }
+        break;
+      }
+
+      if (done) {
         break;
       }
     }
 
-    reader.releaseLock();
+    //reader.releaseLock();
 
     const headerLines = headerText.split("\r\n");
 
@@ -101,7 +108,10 @@ class Server {
 
       (async () => {
         let n = 0;
-        for await (const chunk of conn.readable) {
+
+        while (true) {
+          const { value, done } = await reader.read();
+          const chunk = value;
 
           await writer.write(chunk);
 
@@ -110,6 +120,10 @@ class Server {
 
           if (n >= contentLength) {
             writer.close();
+            break;
+          }
+
+          if (done) {
             break;
           }
         }
