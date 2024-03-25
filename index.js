@@ -31,18 +31,20 @@ class Server {
 
     this._domain = listener.getDomain();
 
+    const connStreamReader = listener.connectionStream.getReader();
+
+    //for await (const conn of listener.connectionStream) {
     while (true) {
 
-      let conn;
+      const { value, done } = await connStreamReader.read();
 
-      try {
-        conn = await listener.accept();
-      }
-      catch (e) {
-        throw e;
-      }
-      
+      const conn = value;
+
       this.handleConn(conn, callback);
+
+      if (done) {
+        break;
+      }
     }
   }
 
@@ -78,7 +80,7 @@ class Server {
       }
 
       if (done) {
-        break;
+        throw new Error("Data stopped before headers finished");
       }
     }
 
