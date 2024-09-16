@@ -183,7 +183,7 @@ class Server {
   }
 }
 
-function directoryTreeHandler(dirTree) {
+function directoryTreeHandler(dirTree, opt) {
   return async (r) => {
     const url = new URL(r.url);
 
@@ -203,7 +203,7 @@ function directoryTreeHandler(dirTree) {
     let statusCode = 200;
 
     /** @type {HeadersInit} */
-    const headers = {};
+    const headers = (opt && opt.headers) || {};
 
     if (r.headers.get('range')) {
       const range = parseRangeHeader(r.headers.get('range'));
