@@ -1,4 +1,5 @@
-const MAX_HEADER_SIZE = 16*1024;
+const MAX_HEADER_SIZE = 16 * 1024;
+const HEADER_TERMINATOR = new Uint8Array([13, 10, 13, 10]);
 
 class Request {
   constructor(uri, opts) {
@@ -14,215 +15,210 @@ class Request {
     return new Headers(this._opts.headers);
   }
 
+  get method() {
+    return this._opts.method;
+  }
+
   get url() {
     return this._uri;
   }
 }
 
 class Server {
-
-  constructor(args) {
-
+  constructor() {
     this._encoder = new TextEncoder();
     this._decoder = new TextDecoder('utf-8');
   }
 
   async serve(listener, callback) {
-
     this._domain = listener.getDomain();
-
     const connStreamReader = listener.connectionStream.getReader();
 
-    //for await (const conn of listener.connectionStream) {
     while (true) {
-
-      const { value, done } = await connStreamReader.read();
-
-      const conn = value;
-
-      this.handleConn(conn, callback);
-
+      const { value: conn, done } = await connStreamReader.read();
       if (done) {
         break;
       }
+
+      this.handleConn(conn, callback).catch((error) => {
+        console.error('http-js connection error:', error);
+      });
     }
   }
 
   async handleConn(conn, callback) {
-    let haveHeaders = false;
-
     const reader = conn.readable.getReader();
+    const { headerBytes, bodyStart } = await readHeaders(reader);
+    const headerText = this._decoder.decode(headerBytes);
+    const headerLines = headerText.split('\r\n');
 
-    let headerText = "";
-    let bodyStart = "";
-
-    let totalBytesRead = 0;
-
-    while (!haveHeaders) {
-      const { value, done } = await reader.read();
-
-      totalBytesRead += value.length;
-      if (totalBytesRead > MAX_HEADER_SIZE) {
-        throw new Error("Headers too big");
-      }
-
-      const text = this._decoder.decode(value);
-
-      const parts = text.split("\r\n\r\n");
-      headerText += parts[0];
-
-      if (parts.length > 1) {
-        bodyStart = parts[1];
-        if (bodyStart.length > 0) {
-          throw new Error("bodyStart not empty", bodyStart);
-        }
-        break;
-      }
-
-      if (done) {
-        throw new Error("Data stopped before headers finished");
-      }
+    const requestLine = headerLines.shift().split(' ');
+    if (requestLine.length !== 3) {
+      throw new Error('Invalid HTTP request line');
     }
-
-    //reader.releaseLock();
-
-    const headerLines = headerText.split("\r\n");
-
-    const statusLine = headerLines[0];
-
-    const statusParts = statusLine.split(" ");
-    const method = statusParts[0];
-    const path = statusParts[1];
-    const proto = statusParts[2];
+    const [method, path] = requestLine;
 
     /** @type {HeadersInit} */
     const headers = {};
-    for (const header of headerLines.slice(1)) {
-      const headerParts = header.split(":");
-      const headerName = headerParts[0].trim().toLowerCase();
-      headers[headerName] = headerParts[1].trim();
+    for (const header of headerLines) {
+      const separator = header.indexOf(':');
+      if (separator < 1) {
+        throw new Error('Invalid HTTP header');
+      }
+      const name = header.slice(0, separator).trim().toLowerCase();
+      const value = header.slice(separator + 1).trim();
+      headers[name] = headers[name] ? `${headers[name]}, ${value}` : value;
     }
 
-    const { readable, writable } = new TransformStream();
-    const writer = writable.getWriter();
+    const contentLength = parseContentLength(headers['content-length']);
+    const body = contentLength > 0
+      ? requestBody(reader, bodyStart, contentLength)
+      : null;
 
-    let body = null;
-    if (method !== 'HEAD' && method !== 'GET') {
-      body = readable;
-
-      const contentLength = Number(headers['content-length']);
-
-      (async () => {
-        let n = 0;
-
-        while (true) {
-          const { value, done } = await reader.read();
-          const chunk = value;
-
-          await writer.write(chunk);
-
-          // TODO: handle if they send more than content-length
-          n += chunk.byteLength;
-
-          if (n >= contentLength) {
-            writer.close();
-            break;
-          }
-
-          if (done) {
-            break;
-          }
-        }
-      })();
-    }
-
-    let uri = `https://${this._domain}${path}`;
-
-    // TODO: had to use custom type because headers were being censored. ie
-    // content-length was being removed
-    const request = new Request(uri, {
+    const request = new Request(`https://${this._domain}${path}`, {
       method,
       headers,
       body,
     });
 
     const response = await callback(request);
+    if (!(response instanceof Response)) {
+      throw new Error('HTTP handler must return a Response');
+    }
 
-    await this._sendResponse(conn, response);
-
-    return null;
+    await this._sendResponse(conn, response, method === 'HEAD');
   }
 
-  async _sendResponse(conn, res) {
-    let headerText = `HTTP/1.1 ${res.status}\r\n`;
+  async _sendResponse(conn, response, omitBody) {
+    const statusText = response.statusText || defaultStatusText(response.status);
+    let headerText = `HTTP/1.1 ${response.status} ${statusText}\r\n`;
 
-    for (const pair of res.headers.entries()) {
-      headerText += `${pair[0]}: ${pair[1]}\r\n`;
+    for (const [name, value] of response.headers.entries()) {
+      headerText += `${name}: ${value}\r\n`;
     }
-
-    headerText += `\r\n`;
-
-    const headers = this._encoder.encode(headerText);
+    headerText += 'Connection: close\r\n\r\n';
 
     const writer = conn.writable.getWriter();
-
-    await writer.write(headers);
+    await writer.write(this._encoder.encode(headerText));
     writer.releaseLock();
 
-    try {
-      await res.body.pipeTo(conn.writable);
+    if (!omitBody && response.body !== null) {
+      await response.body.pipeTo(conn.writable);
     }
-    catch (e) {
-      //console.error("http-js error: res.body.pipeTo", e);
+    else {
+      const closeWriter = conn.writable.getWriter();
+      await closeWriter.close();
     }
-
-    // TODO: might need to close here
-    //await writer.close();
-
-    return null;
   }
 }
 
+async function readHeaders(reader) {
+  let buffered = new Uint8Array(0);
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      throw new Error('Connection closed before HTTP headers finished');
+    }
+
+    const next = new Uint8Array(buffered.byteLength + value.byteLength);
+    next.set(buffered);
+    next.set(value, buffered.byteLength);
+    buffered = next;
+
+    const headerEnd = indexOf(buffered, HEADER_TERMINATOR);
+    if (headerEnd >= 0) {
+      return {
+        headerBytes: buffered.slice(0, headerEnd),
+        bodyStart: buffered.slice(headerEnd + HEADER_TERMINATOR.byteLength),
+      };
+    }
+
+    if (buffered.byteLength > MAX_HEADER_SIZE) {
+      throw new Error('HTTP headers too large');
+    }
+  }
+}
+
+function requestBody(reader, firstChunk, contentLength) {
+  let bytesRead = 0;
+  let pending = firstChunk;
+
+  return new ReadableStream({
+    async pull(controller) {
+      if (bytesRead >= contentLength) {
+        controller.close();
+        return;
+      }
+
+      let chunk;
+      if (pending.byteLength > 0) {
+        chunk = pending;
+        pending = new Uint8Array(0);
+      }
+      else {
+        const result = await reader.read();
+        if (result.done) {
+          controller.error(new Error('Connection closed before HTTP body finished'));
+          return;
+        }
+        chunk = result.value;
+      }
+
+      const remaining = contentLength - bytesRead;
+      if (chunk.byteLength > remaining) {
+        chunk = chunk.slice(0, remaining);
+      }
+      bytesRead += chunk.byteLength;
+      controller.enqueue(chunk);
+
+      if (bytesRead >= contentLength) {
+        controller.close();
+      }
+    },
+  });
+}
+
 function directoryTreeHandler(dirTree, opt) {
-  return async (r) => {
-    const url = new URL(r.url);
+  return async (request) => {
+    const url = new URL(request.url);
 
     let file;
     try {
       file = await dirTree.openFile(url.pathname);
     }
-    catch (e) {
-      return new Response("Not found", {
+    catch {
+      return new Response('Not found', {
         status: 404,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       });
     }
 
     let sendFile = file;
-    const contentType = file.type;
-
     let statusCode = 200;
+    const headers = { ...((opt && opt.headers) || {}) };
 
-    /** @type {HeadersInit} */
-    const headers = (opt && opt.headers) || {};
-
-    if (r.headers.get('range')) {
-      const range = parseRangeHeader(r.headers.get('range'));
-
-      if (range.end !== undefined) {
-        sendFile = file.slice(range.start, range.end + 1);
-        headers['Content-Range'] = `bytes ${range.start}-${range.end}/${file.size}`;
+    const rangeHeader = request.headers.get('range');
+    if (rangeHeader) {
+      let range;
+      try {
+        range = parseRangeHeader(rangeHeader, file.size);
       }
-      else {
-        sendFile = file.slice(range.start);
-        headers['Content-Range'] = `bytes ${range.start}-${file.size - 1}/${file.size}`;
+      catch {
+        return new Response(null, {
+          status: 416,
+          headers: { 'Content-Range': `bytes */${file.size}` },
+        });
       }
 
+      sendFile = file.slice(range.start, range.end + 1);
+      headers['Content-Range'] = `bytes ${range.start}-${range.end}/${file.size}`;
       statusCode = 206;
     }
 
     headers['Accept-Ranges'] = 'bytes';
-    headers['Content-Type'] = contentType;
-    headers['Content-Length'] = sendFile.size;
+    headers['Content-Type'] = file.type || 'application/octet-stream';
+    headers['Content-Length'] = String(sendFile.size);
 
     return new Response(sendFile.stream(), {
       status: statusCode,
@@ -232,17 +228,67 @@ function directoryTreeHandler(dirTree, opt) {
 }
 
 function parseRangeHeader(headerText, maxSize) {
-  const range = {};
-  const right = headerText.split('=')[1];
-  const rangeParts = right.split('-');
-  range.start = Number(rangeParts[0]);
-  //range.end = maxSize - 1;
-
-  if (rangeParts[1]) {
-    range.end = Number(rangeParts[1]);
+  const match = /^bytes=(\d*)-(\d*)$/.exec(headerText.trim());
+  if (!match || maxSize <= 0 || (!match[1] && !match[2])) {
+    throw new Error('Invalid range');
   }
 
-  return range;
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffixLength = Number(match[2]);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+      throw new Error('Invalid range');
+    }
+    start = Math.max(0, maxSize - suffixLength);
+    end = maxSize - 1;
+  }
+  else {
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : maxSize - 1;
+  }
+
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+      start < 0 || start >= maxSize || end < start) {
+    throw new Error('Invalid range');
+  }
+
+  return { start, end: Math.min(end, maxSize - 1) };
+}
+
+function parseContentLength(value) {
+  if (value === undefined) {
+    return 0;
+  }
+  const length = Number(value);
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new Error('Invalid Content-Length');
+  }
+  return length;
+}
+
+function indexOf(haystack, needle) {
+  outer: for (let i = 0; i <= haystack.byteLength - needle.byteLength; i++) {
+    for (let j = 0; j < needle.byteLength; j++) {
+      if (haystack[i + j] !== needle[j]) {
+        continue outer;
+      }
+    }
+    return i;
+  }
+  return -1;
+}
+
+function defaultStatusText(status) {
+  const statuses = {
+    200: 'OK',
+    206: 'Partial Content',
+    400: 'Bad Request',
+    404: 'Not Found',
+    416: 'Range Not Satisfiable',
+    500: 'Internal Server Error',
+  };
+  return statuses[status] || '';
 }
 
 export {
